@@ -1,0 +1,61 @@
+# GitHub Actions CI/CD: build the Spring Boot jar, then deploy it to an EC2 instance over SSH.
+#
+# HOW IT RUNS: GitHub automatically runs this on every push to the chosen branch.
+#
+# BEFORE IT WORKS, add these in GitHub -> your repo -> Settings -> Secrets and variables -> Actions -> New repository secret:
+#   EC2_SSH_KEY  = the full contents of your EC2 .pem private key (open the .pem in a text editor, copy everything)
+#   EC2_HOST     = your EC2 public IP or DNS, e.g. 13.233.xx.xx
+#   EC2_USER     = ec2-user
+#
+# ON THE EC2 INSTANCE (one-time), set up the env file + systemd service as in DEPLOY-AWS.md Part E:
+#   /home/ec2-user/aws-demo/target/        (folder for the jar)
+#   /home/ec2-user/awsdemo.env             (DB_HOST, DB_PASSWORD, AWS_S3_BUCKET, ...)
+#   a systemd service named "awsdemo"       (so we can restart it after copying the new jar)
+
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main            # deploy whenever main is updated. Change to product-demo if you deploy that branch.
+  workflow_dispatch: {}  # also allows manual "Run workflow" button in the Actions tab
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) get your code onto the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2) install Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      # 3) build the jar (skip tests so a missing DB in CI doesn't block the build)
+      - name: Build with Maven
+        run: ./mvnw -B clean package -DskipTests
+
+      # 4) load the EC2 private key into the runner's SSH agent
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # 5) copy the freshly built jar to EC2
+      - name: Copy jar to EC2
+        run: |
+          scp -i ~/.ssh/id_rsa target/*.jar \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/ec2-user/aws-demo/target/aws.demo-0.0.1-SNAPSHOT.jar"
+
+      # 6) restart the app on EC2 so it picks up the new jar
+      - name: Restart app on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "sudo systemctl restart awsdemo && sleep 3 && systemctl is-active awsdemo"

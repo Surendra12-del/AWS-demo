@@ -3,9 +3,10 @@
 # HOW IT RUNS: GitHub automatically runs this on every push to the chosen branch.
 #
 # BEFORE IT WORKS, add these in GitHub -> your repo -> Settings -> Secrets and variables -> Actions -> New repository secret:
-#   EC2_SSH_KEY  = the full contents of your EC2 .pem private key (open the .pem in a text editor, copy everything)
-#   EC2_HOST     = your EC2 public IP or DNS, e.g. 13.233.xx.xx
-#   EC2_USER     = ec2-user
+#   EC2_SSH_KEY  = the FULL contents of your EC2 .pem private key, INCLUDING the
+#                  -----BEGIN ... PRIVATE KEY----- and -----END ... PRIVATE KEY----- lines.
+#   EC2_HOST     = your EC2 public IP or DNS, e.g. 13.201.185.81
+#   EC2_USER     = ec2-user   (use "ubuntu" if your instance is an Ubuntu image)
 #
 # ON THE EC2 INSTANCE (one-time), set up the env file + systemd service as in DEPLOY-AWS.md Part E:
 #   /home/ec2-user/aws-demo/target/        (folder for the jar)
@@ -17,7 +18,7 @@ name: Build and Deploy to EC2
 on:
   push:
     branches:
-      - main            # deploy whenever main is updated. Change to product-demo if you deploy that branch.
+      - main            # deploy whenever main is updated.
   workflow_dispatch: {}  # also allows manual "Run workflow" button in the Actions tab
 
 jobs:
@@ -40,22 +41,25 @@ jobs:
       - name: Build with Maven
         run: ./mvnw -B clean package -DskipTests
 
-      # 4) load the EC2 private key into the runner's SSH agent
-      - name: Set up SSH
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
-
-      # 5) copy the freshly built jar to EC2
+      # 4) copy the freshly built jar to EC2 (this action handles the SSH key robustly)
       - name: Copy jar to EC2
-        run: |
-          scp -i ~/.ssh/id_rsa target/*.jar \
-            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/home/ec2-user/aws-demo/target/aws.demo-0.0.1-SNAPSHOT.jar"
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "target/aws.demo-0.0.1-SNAPSHOT.jar"
+          target: "/home/ec2-user/aws-demo/target/"
+          strip_components: 1   # drop the "target/" prefix so the file lands directly in the target dir
 
-      # 6) restart the app on EC2 so it picks up the new jar
+      # 5) restart the app on EC2 so it picks up the new jar
       - name: Restart app on EC2
-        run: |
-          ssh -i ~/.ssh/id_rsa "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
-            "sudo systemctl restart awsdemo && sleep 3 && systemctl is-active awsdemo"
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            sudo systemctl restart awsdemo
+            sleep 3
+            systemctl is-active awsdemo

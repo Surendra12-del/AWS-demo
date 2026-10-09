@@ -1,0 +1,48 @@
+# GitLab CI/CD pipeline: build the Spring Boot jar, then deploy it to an EC2 instance over SSH.
+#
+# HOW IT RUNS: GitLab automatically executes this file on every push.
+# It has two stages — "build" (make the jar) and "deploy" (ship it to EC2).
+#
+# BEFORE IT WORKS, add these in GitLab -> Settings -> CI/CD -> Variables:
+#   EC2_SSH_KEY   = the full contents of your EC2 .pem private key   (mark as "Protected", type "File" or masked variable)
+#   EC2_HOST      = your EC2 public IP or DNS, e.g. 13.233.xx.xx
+#   EC2_USER      = ec2-user
+#
+# ON THE EC2 INSTANCE (one-time), set up the env file + service as described in DEPLOY-AWS.md Part E:
+#   /home/ec2-user/awsdemo.env         (DB_HOST, DB_PASSWORD, AWS_S3_BUCKET, ...)
+#   systemd service named "awsdemo"     (so we can restart it after copying the new jar)
+
+stages:
+  - build
+  - deploy
+
+# -------- Stage 1: build the jar inside a Maven+JDK17 container --------
+build:
+  stage: build
+  image: maven:3.9-eclipse-temurin-17
+  script:
+    - ./mvnw -B clean package -DskipTests
+  artifacts:
+    paths:
+      - target/*.jar          # pass the jar to the deploy stage
+    expire_in: 1 hour
+
+# -------- Stage 2: copy the jar to EC2 and restart the app --------
+deploy:
+  stage: deploy
+  image: alpine:latest
+  needs: ["build"]            # waits for build + reuses its jar artifact
+  only:
+    - main                    # only deploy from the main branch (change to product-demo if you deploy that)
+  before_script:
+    # install ssh/scp tools in the tiny alpine image
+    - apk add --no-cache openssh-client
+    # load the private key from the GitLab variable
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - echo "$EC2_SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    # 1) copy the freshly built jar to the server
+    - scp -i ~/.ssh/id_rsa target/*.jar "$EC2_USER@$EC2_HOST:/home/ec2-user/aws-demo/target/aws.demo-0.0.1-SNAPSHOT.jar"
+    # 2) restart the systemd service so it picks up the new jar
+    - ssh -i ~/.ssh/id_rsa "$EC2_USER@$EC2_HOST" "sudo systemctl restart awsdemo && sleep 3 && systemctl is-active awsdemo"
